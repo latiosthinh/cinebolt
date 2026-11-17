@@ -1,0 +1,26 @@
+# Build output and local tooling
+android-tv/app/build/
+android-tv/build/
+android-tv/.gradle/
+android-tv/local.properties
+.gradle-home/
+.gradle/
+.idea/
+*.iml
+*.apk
+*.aab
+
+# Signing material never belongs in the repo
+*.jks
+*.keystore
+
+# Scratch captures and tool state from development sessions
+/*.png
+/*.txt
+/b.focus();
+.playwright-mcp/
+shots-categories/
+node_modules/
+/UI-UX-AUDIT.md
+android-tv/.kotlin/
+.kotlin/
