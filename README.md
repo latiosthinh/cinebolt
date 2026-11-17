@@ -13,6 +13,8 @@ Vietnamese catalogs from seven sources, one clean 10-foot interface, zero server
 ![Vanilla JS](https://img.shields.io/badge/UI-vanilla%20JS-F7DF1E?logo=javascript&logoColor=black)
 ![No server](https://img.shields.io/badge/server-embedded-ffb53d)
 
+**[⬇ Download the latest APK](https://github.com/latiosthinh/cinebolt/releases/latest)**
+
 <img src="docs/screenshots/home.jpg" width="860" alt="CineBolt home screen">
 
 </div>
