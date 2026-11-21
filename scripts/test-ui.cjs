@@ -3,15 +3,17 @@ const vm = require('node:vm');
 const fs = require('node:fs');
 const assert = require('node:assert/strict');
 const nodes = new Map();
-function node() {return {value:'',innerHTML:'',textContent:'',hidden:false,inert:false,style:{setProperty(){}},dataset:{},classList:{add(){},remove(){},contains(){return false;}},setAttribute(){},addEventListener(){},querySelector(){return node();},querySelectorAll(){return [];},focus(){},append(){},removeAttribute(){},load(){},pause(){}};}
+function node() {return {value:'',innerHTML:'',textContent:'',hidden:false,inert:false,style:{setProperty(){}},dataset:{},classList:{add(){},remove(){},contains(){return false;},toggle(){}},setAttribute(){},addEventListener(){},querySelector(){return node();},querySelectorAll(){return [];},focus(){},append(){},removeAttribute(){},load(){},pause(){},getBoundingClientRect(){return {top:0,left:0,right:0,bottom:0,width:0,height:0};},scrollIntoView(){},closest(){return null;}};}
 const storage = new Map();
-const context = vm.createContext({console,URL,AbortController,setTimeout,clearTimeout,location:{hostname:'localhost',protocol:'http:'},window:{scrollTo(){}},document:{getElementById(id){if(!nodes.has(id))nodes.set(id,node());return nodes.get(id);},createElement:node,body:node(),querySelectorAll(){return [];},addEventListener(){}},localStorage:{getItem:k=>storage.get(k),setItem:(k,v)=>storage.set(k,v)},fetch:async()=>({ok:true,json:async()=>({metas:[]})})});
+const listeners = new Map();
+const context = vm.createContext({console,URL,AbortController,setTimeout,clearTimeout,requestAnimationFrame:fn=>setTimeout(fn,0),location:{hostname:'localhost',protocol:'http:'},window:{scrollTo(){},addEventListener(){},innerWidth:960,innerHeight:540},document:{getElementById(id){if(!nodes.has(id))nodes.set(id,node());return nodes.get(id);},createElement:node,body:node(),querySelectorAll(){return [];},addEventListener(type,fn){const list=listeners.get(type)||[];list.push(fn);listeners.set(type,list);}},localStorage:{getItem:k=>storage.get(k),setItem:(k,v)=>storage.set(k,v)},fetch:async()=>({ok:true,json:async()=>({metas:[]})})});
 const source=fs.readFileSync('UI/app.js','utf8').replace(/openTab\(1\);\s*$/,'');
 vm.runInContext(source,context);
 vm.runInContext(fs.readFileSync('UI/player.js','utf8'),context);
 // Each check starts with an empty catalog cache so mocked responses apply; the cache itself is checked with raw.
 const raw = code => vm.runInContext(code,context);
 const run = code => { raw('apiCache.clear()'); return raw(code); };
+const fire = (type,event={}) => (listeners.get(type)||[]).forEach(fn=>fn({preventDefault(){},stopPropagation(){},...event}));
 (async()=>{
   assert.equal(run("mapMeta({id:'a',name:'Phim',genres:['Action']}).g"),'Hành động');
   assert.equal(run("mapMeta({id:'a'}).y"),'');
@@ -487,6 +489,139 @@ const run = code => { raw('apiCache.clear()'); return raw(code); };
   assert(/\.brand span\s*\{\s*display:\s*none\s*!important/i.test(tvCss));
   assert(/\.tab span\s*\{\s*display:\s*none\s*!important/i.test(tvCss));
   assert(/\.tab\.f span[^{]*\{\s*display:\s*inline\s*!important/i.test(tvCss));
+  // Category info column: full description (no line clamp), conditional bottom fade, height fitted to the grid's second row.
+  assert(!/\.info-desc\{[^}]*line-clamp/.test(tvCss));
+  assert(/\.info-desc\.fade::after/.test(tvCss));
+  assert(/function fitInfoColumn/.test(fs.readFileSync('UI/app.js','utf8')));
+
+  // Continue removal: the history entry and every film/episode progress and watched record tied to it are cleared,
+  // an unrelated film keeps its records, and all three maps are written back to localStorage.
+  raw(`historyMap={'movie:drop':{item:{id:'drop',type:'movie',t:'Drop'},at:1},'movie:keep':{item:{id:'keep',type:'movie',t:'Keep'},at:2}};
+    progressMap={drop:{t:300,d:6000},'drop:1:2':{t:120,d:2700},keep:{t:60,d:6000}};
+    watchedMap={'movie:drop':{id:'drop'},'series:other':{id:'other:1:3'}};`);
+  assert.equal(run("removeContinue({id:'drop',type:'movie'})"), true);
+  assert.equal(run("'movie:drop' in historyMap"), false);
+  assert.equal(run("'movie:keep' in historyMap"), true);
+  assert.equal(run("JSON.stringify(Object.keys(progressMap))"), '["keep"]');
+  assert.equal(run("'movie:drop' in watchedMap"), false);
+  assert.equal(run("'series:other' in watchedMap"), true);
+  assert.deepEqual(JSON.parse(storage.get('cinebolt.history')), { 'movie:keep': { item: { id: 'keep', type: 'movie', t: 'Keep' }, at: 2 } });
+  assert.deepEqual(Object.keys(JSON.parse(storage.get('cinebolt.progress'))), ['keep']);
+  assert.deepEqual(Object.keys(JSON.parse(storage.get('cinebolt.watched'))), ['series:other']);
+
+  // Series removal drops the watched episode and that series' episode progress, but not another series'.
+  raw(`historyMap={'series:s1':{item:{id:'s1',type:'series'},at:9},'series:s2':{item:{id:'s2',type:'series'},at:8}};
+    progressMap={'s1:1:2':{t:120,d:2700},'s2:1:2':{t:90,d:2700}};
+    watchedMap={'series:s1':{id:'s1:1:2'},'series:s2':{id:'s2:1:2'}};`);
+  assert.equal(run("removeContinue({id:'s1',type:'series'})"), true);
+  assert.equal(run("JSON.stringify(Object.keys(historyMap))"), '["series:s2"]');
+  assert.equal(run("JSON.stringify(Object.keys(progressMap))"), '["s2:1:2"]');
+  assert.equal(run("JSON.stringify(Object.keys(watchedMap))"), '["series:s2"]');
+
+  // Saved tab: cards are hold-eligible, "Bỏ lưu" removes through saveItem, and the empty state returns.
+  run(`savedItems=[{id:'sv1',type:'movie',t:'Saved One',hd:'',d:'Mô tả'}];
+    localStorage.setItem('cinebolt.saved',JSON.stringify(savedItems));renderSavedList();`);
+  const savedHtml = nodes.get('shelves').innerHTML;
+  assert(savedHtml.includes('data-hold="saved"'));
+  assert(savedHtml.includes('Giữ OK để xoá'));
+  assert.equal(run("saveItem(savedItems[0])"), true);
+  assert.equal(run('savedItems.length'), 0);
+  assert.equal(run("isSaved({id:'sv1',type:'movie'})"), false);
+  run('renderSavedList()');
+  assert(nodes.get('shelves').innerHTML.includes('Bạn chưa lưu phim nào'));
+
+  // Focus after a row change picks the card that moved into the removed card's slot, else the one before it.
+  const focused=[];
+  const fakeFocusCard=(row,id)=>({dataset:{row:String(row),item:id},classList:{contains(){return false;}},getClientRects(){return [{}];},getBoundingClientRect(){return {top:row*100,left:0,right:80,bottom:row*100+180};},closest(){return null;},focus(){focused.push(this.dataset.item);},scrollIntoView(){}});
+  const rowCards=[fakeFocusCard(2,'a'),fakeFocusCard(2,'b')];
+  context.document.querySelectorAll=selector=>selector==='#shelves .card'?rowCards:[];
+  raw("focusAfterRemoval({left:0,right:80,top:200,bottom:380},2,1)");
+  assert.deepEqual(focused,['b']);
+  focused.length=0;
+  context.document.querySelectorAll=selector=>selector==='#shelves .card'?[rowCards[0]]:[];
+  raw("focusAfterRemoval({left:0,right:80,top:200,bottom:380},2,1)");
+  assert.deepEqual(focused,['a']);
+  // With no rows left, focus still lands on the nav's current tab (never <body>).
+  focused.length=0;
+  const navFocus={focused:false,focus(){this.focused=true;}};
+  context.document.querySelectorAll=()=>[];
+  nodes.get('nav').querySelector=()=>navFocus;
+  raw("focusAfterRemoval({left:0,right:0,top:0,bottom:0},2,0)");
+  assert.equal(navFocus.focused,true);
+
+  // Hold OK: bridge and keydown share one timer, repeats are ignored, the popup opens after 600 ms,
+  // releasing a hold does not run the short action, and a fresh Enter then selects a popup item.
+  const holdCard={dataset:{hold:'continue',item:'movie:h1'},classList:{contains:c=>c==='card'},getClientRects(){return [{}];},getBoundingClientRect(){return {top:100,left:100,right:180,bottom:280};},closest(){return null;},focus(){},scrollIntoView(){}};
+  context.document.activeElement=holdCard;
+  raw(`apiCache.clear();__acts=[];openDetail=x=>__acts.push('detail:'+x.id);playItem=x=>__acts.push('resume:'+x.id);
+    cardPopupState=null;holdState=null;cardPopupKeyupSeen=false;ignoreCardClickUntil=0;
+    items.clear();items.set('movie:h1',{id:'h1',type:'movie',t:'Hold Phim',hd:'',d:'Mô tả'});`);
+  context.window.cineBoltOk();
+  const sharedTimer=raw('holdState&&holdState.timer');
+  assert.notEqual(sharedTimer, null);
+  fire('keydown',{key:'Enter',repeat:false,target:holdCard});
+  assert.equal(raw('holdState.timer'),sharedTimer); // the bridge start is not restarted by the first keydown
+  fire('keydown',{key:'Enter',repeat:true,target:holdCard});
+  await new Promise(r=>setTimeout(r,700));
+  assert.equal(raw("cardPopupState&&cardPopupState.mode"),'continue');
+  assert(nodes.get('filterPopupList').innerHTML.includes('Xoá khỏi Xem tiếp'));
+  assert.equal(nodes.get('filterPopupList').innerHTML.includes('Chi tiết'),true);
+  fire('keydown',{key:'Enter',repeat:true,target:holdCard});
+  assert.equal(raw('JSON.stringify(__acts)'),'[]'); // held repeats never select the first item
+  fire('keyup',{key:'Enter',target:holdCard});
+  assert.equal(raw('cardPopupKeyupSeen'),true);
+  assert.equal(raw('holdState'),null);
+  assert.equal(raw('cardPopupState!==null'),true);
+  assert.equal(raw('JSON.stringify(__acts)'),'[]'); // releasing after a hold must not resume/details
+  const popupButton={classList:{contains:c=>c==='popup-item'},dataset:{cardAction:'detail'},focus(){}};
+  context.document.activeElement=popupButton;
+  fire('keydown',{key:'Enter',repeat:false,target:popupButton});
+  assert.equal(raw('JSON.stringify(__acts)'),'["detail:h1"]');
+  assert.equal(raw('cardPopupState'),null);
+
+  // Short OK: the bridge starts the timer, keyup before 600 ms runs the old action (resume on a resume card) and no popup stays.
+  raw("__acts=[];cardPopupState=null;holdState=null;cardPopupKeyupSeen=false;items.clear();items.set('movie:h2',{id:'h2',type:'movie',t:'Short',hd:'',d:'Mô tả'});");
+  const shortCard={dataset:{hold:'continue',item:'movie:h2',resume:'1'},classList:{contains:c=>c==='card'},getClientRects(){return [{}];},getBoundingClientRect(){return {top:100,left:100,right:180,bottom:280};},closest(){return null;},focus(){},scrollIntoView(){}};
+  context.document.activeElement=shortCard;
+  context.window.cineBoltOk();
+  await new Promise(r=>setTimeout(r,120));
+  fire('keyup',{key:'Enter',target:shortCard});
+  assert.equal(raw('JSON.stringify(__acts)'),'["resume:h2"]');
+  assert.equal(raw('cardPopupState'),null);
+  assert.equal(raw('holdState'),null);
+
+  // Removing or updating the continue row keeps sibling shelf nodes and renumbers later rows.
+  const oldShelves=nodes.get('shelves');
+  const mkRowCard=(item,row)=>({dataset:{item,row:String(row)},focus(){},scrollIntoView(){},closest(){return null;},getClientRects(){return [{}];}});
+  const contCards=[mkRowCard('movie:c1',3)];
+  const contBody={innerHTML:'',querySelectorAll:()=>contCards};
+  const contSection={removed:false,querySelector:sel=>sel==='.shelf-body'?contBody:null,querySelectorAll:()=>contCards,remove(){this.removed=true;const i=fakeShelves.children.indexOf(this);if(i>=0)fakeShelves.children.splice(i,1);}};
+  const secondCards=[mkRowCard('movie:s1',3)], thirdCards=[mkRowCard('movie:s2',4)];
+  const second={querySelectorAll:()=>secondCards}, third={querySelectorAll:()=>thirdCards};
+  const fakeShelves={children:[contSection,second,third],querySelector:sel=>sel==='[data-cont]'?contSection:null};
+  nodes.set('shelves',fakeShelves);
+  raw("__origContinueList=continueList;continueList=()=>[]");
+  raw("rerenderContinueRow({dataset:{row:'2'},getBoundingClientRect(){return {top:0,left:0,right:1,bottom:1};}},0)");
+  assert.equal(contSection.removed,true);
+  assert.equal(fakeShelves.children[0],second);assert.equal(fakeShelves.children[1],third);
+  assert.equal(String(secondCards[0].dataset.row),'2');assert.equal(String(thirdCards[0].dataset.row),'3');
+  raw("continueList=()=>[{x:{id:'c2',type:'movie',t:'Tiếp Tục Mới',d:'Mô tả'},progress:0.5,sub:'',resume:true}]");
+  fakeShelves.children=[contSection,second,third];contSection.removed=false;
+  raw("rerenderContinueRow({dataset:{row:'2'},getBoundingClientRect(){return {top:0,left:0,right:1,bottom:1};}},0)");
+  assert.equal(contSection.removed,false);
+  assert(contBody.innerHTML.includes('Tiếp Tục Mới'));
+  assert.equal(fakeShelves.children[1],second);assert.equal(fakeShelves.children[2],third);
+  assert.equal(String(secondCards[0].dataset.row),'3');assert.equal(String(thirdCards[0].dataset.row),'4');
+  // Updating the continue row must not prune the shared item map: a film removed from the row can still
+  // be shown by a sibling catalog shelf, so its card key has to stay resolvable.
+  raw("items.set('movie:c1',{id:'c1',type:'movie',t:'Phim C1',hd:'',d:'Mô tả'})");
+  raw("continueList=()=>[{x:{id:'c2',type:'movie',t:'Tiếp Tục Mới',d:'Mô tả'},progress:0.5,sub:'',resume:true}]");
+  raw("rerenderContinueRow({dataset:{row:'2'},getBoundingClientRect(){return {top:0,left:0,right:1,bottom:1};}},0)");
+  assert.equal(raw("items.has('movie:c1')"), true);
+  assert.equal(raw("items.get('movie:c1').id"), 'c1');
+  assert.equal(raw("items.get('movie:c2').id"), 'c2');
+  raw('continueList=__origContinueList');
+  nodes.set('shelves',oldShelves);
 
   for(const name of ['app.js','index.html','player.js','tv.css','logo.svg'])assert.equal(fs.readFileSync('UI/'+name,'utf8'),fs.readFileSync('android-tv/app/src/main/assets/'+name,'utf8'));
   const html=fs.readFileSync('UI/index.html','utf8');assert(html.includes('lang="vi"'));assert(html.includes('charset="utf-8"'));

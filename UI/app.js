@@ -153,9 +153,31 @@ function setHero(x) {
   $('hActions').innerHTML = actions(x) + '<button class="btn" data-action="detail">Chi tiết</button>';
   $('hActions').querySelectorAll('button').forEach((el,c) => {el.dataset.row=1;el.dataset.col=c;});
 }
+function renderSavedList() {
+  if(!savedItems.length) { $('shelves').innerHTML='<p class="empty">Bạn chưa lưu phim nào. Chọn “Lưu phim” để xem lại tại đây.</p>'; return; }
+  renderShelves([{def:{h:'Phim đã lưu',kind:'land',saved:true},list:[...savedItems].reverse()}]);
+}
+function shelfBodyHtml({def,list,error}, i) {
+  if(error) return '<div class="empty">Không tải được danh sách phim. Vui lòng kiểm tra kết nối. <button class="btn" data-row="' + (i+2) + '" data-col="0" data-action="retry">Thử lại</button></div>';
+  if(!list.length) return '<p class="empty">Chưa có phim trong danh sách này.</p>';
+  return `<div class="track" tabindex="-1">${list.map((x,c)=>{
+    const hold = def.cont ? 'continue' : def.saved ? 'saved' : '';
+    let html = def.cont ? card(x.x,i+2,c,false,false,x) : card(x,i+2,c,false,def.kind==='post');
+    if(hold) html = html.replace('<button class="card"', `<button class="card" data-hold="${hold}"${def.cont && x.resume ? ' data-resume="1"' : ''}`);
+    return html;
+  }).join('')}</div>`;
+}
+function shelfHtml(g, i) {
+  const {def} = g;
+  const hint = def.cont || def.saved ? '<span class="shelf-hint">Giữ OK để xoá</span>' : '';
+  return `<section class="shelf ${def.kind}"${def.cont ? ' data-cont="1"' : ''}><h2>${esc(def.h)}${hint}</h2><div class="shelf-body">${shelfBodyHtml(g,i)}</div></section>`;
+}
 function renderShelves(groups) {
   items=new Map(); // only cards on screen are needed; avoids growing across tab switches
-  $('shelves').innerHTML = groups.map(({def,list,error},i) => `<section class="shelf ${def.kind}"><h2>${esc(def.h)}</h2>${error ? '<div class="empty">Không tải được danh sách phim. Vui lòng kiểm tra kết nối. <button class="btn" data-row="' + (i+2) + '" data-col="0" data-action="retry">Thử lại</button></div>' : list.length ? `<div class="track" tabindex="-1">${list.map((x,c)=>def.cont ? card(x.x,i+2,c,false,false,x).replace('<button class="card"', `<button class="card"${x.resume ? ' data-resume="1"' : ''}`) : card(x,i+2,c,false,def.kind==='post')).join('')}</div>` : '<p class="empty">Chưa có phim trong danh sách này.</p>'}</section>`).join('');
+  $('shelves').innerHTML = groups.map(shelfHtml).join('');
+}
+function renumberShelfRows() {
+  [...$('shelves').children].forEach((section,i) => section.querySelectorAll('[data-row]').forEach(el => { el.dataset.row = i+2; }));
 }
 // The sidebar widens to show every label while focus is anywhere in it.
 document.getElementById('nav')?.addEventListener('focusin',()=>document.body.classList.add('nav-open'));
@@ -468,6 +490,7 @@ function updateInfoCol(x) {
     $('infoOrigTitle') && ($('infoOrigTitle').textContent = '', $('infoOrigTitle').hidden = true);
     $('infoMeta') && ($('infoMeta').textContent = '');
     $('infoDesc') && ($('infoDesc').textContent = '');
+    requestAnimationFrame(refreshInfoDesc);
     return;
   }
   $('infoTitle') && ($('infoTitle').textContent = x.t || '');
@@ -487,6 +510,27 @@ function updateInfoCol(x) {
   if (dEl) {
     dEl.textContent = x.d || '';
   }
+  requestAnimationFrame(refreshInfoDesc);
+}
+
+// The description gets whatever height the title/meta leave inside a column reserved to the second poster row.
+function refreshInfoDesc() {
+  const dEl = $('infoDesc');
+  if (!dEl) return;
+  dEl.classList.toggle('fade', dEl.scrollHeight > dEl.clientHeight + 1);
+}
+
+function fitInfoColumn() {
+  const col = $('categoryInfoCol'), grid = $('categoryGrid');
+  if (!col || !grid) return;
+  const cards = grid.querySelectorAll('.card');
+  if (!cards.length) { col.style.height = ''; refreshInfoDesc(); return; }
+  // Bottom of the second row (or of the only row when a page has fewer than six films).
+  const last = cards[Math.min(cards.length - 1, GRID_COLS * 2 - 1)];
+  const bottom = last.getBoundingClientRect().bottom;
+  const top = col.getBoundingClientRect().top;
+  col.style.height = `${Math.max(0, Math.round(bottom - top))}px`;
+  refreshInfoDesc();
 }
 
 function setCategoryFocusedFilm(x) {
@@ -527,9 +571,118 @@ function setCategoryFocusedFilm(x) {
 
 let popupState = null;
 
+/* ---------- hold-OK card actions (Xem tiếp / Đã lưu) ---------- */
+const HOLD_MS = 600;
+let cardPopupState = null, cardPopupKeyupSeen = false, holdState = null, ignoreCardClickUntil = 0;
+
+function holdEligible(card) {
+  return !!(card && card.classList?.contains('card')
+    && (card.dataset.hold === 'continue' || card.dataset.hold === 'saved')
+    && items.has(card.dataset.item));
+}
+function positionPopupPanel(panel, trigger) {
+  const rect = trigger?.getBoundingClientRect?.() || {bottom:110,left:40,top:40};
+  const winW = (typeof window !== 'undefined' && window.innerWidth) ? window.innerWidth : 960;
+  const winH = (typeof window !== 'undefined' && window.innerHeight) ? window.innerHeight : 540;
+  const maxH = Math.min(winH * 0.6, 380);
+  panel.style.maxHeight = `${maxH}px`;
+  const h = Math.min(maxH, panel.scrollHeight || 180);
+  let top = rect.bottom + 6;
+  if(top + h > winH - 12) top = Math.max(12, rect.top - h - 6);
+  panel.style.top = `${top}px`;
+  panel.style.left = `${Math.max(12, Math.min(winW - 276, rect.left))}px`;
+}
+function cancelCardHold() {
+  if(holdState) { clearTimeout(holdState.timer); holdState = null; }
+}
+function startCardHold(card) {
+  if(!holdEligible(card) || cardPopupState) return;
+  if(holdState) { if(holdState.card === card) return; cancelCardHold(); }
+  ignoreCardClickUntil = Date.now() + 900;
+  const st = {card, opened:false, timer:0};
+  st.timer = setTimeout(() => {
+    if(holdState !== st) return;
+    st.opened = true;
+    openCardPopup(card);
+  }, HOLD_MS);
+  holdState = st;
+}
+function openCardPopup(card) {
+  if(!holdEligible(card)) return;
+  const item = items.get(card.dataset.item);
+  if(!item) return;
+  if(popupState) closeFilterPopup(null);
+  const mode = card.dataset.hold;
+  cardPopupState = {card, item, mode};
+  cardPopupKeyupSeen = false;
+  const titleEl = $('filterPopupTitle');
+  if(titleEl) titleEl.textContent = item.t || '';
+  const listEl = $('filterPopupList');
+  if(listEl) {
+    const options = mode === 'continue'
+      ? [{id:'resume',name:'Xem tiếp'},{id:'detail',name:'Chi tiết'},{id:'remove',name:'Xoá khỏi Xem tiếp'}]
+      : [{id:'detail',name:'Chi tiết'},{id:'remove',name:'Bỏ lưu'}];
+    listEl.innerHTML = options.map((opt,idx) => `<button class="popup-item" data-card-action="${opt.id}" data-index="${idx}">${esc(opt.name)}</button>`).join('');
+  }
+  const popup = $('filterPopup');
+  if(popup) {
+    popup.hidden = false;
+    popup.setAttribute('aria-hidden','false');
+    popup.inert = false;
+  }
+  const panel = $('filterPopupPanel');
+  if(panel) positionPopupPanel(panel, card);
+  setTimeout(() => {
+    const first = listEl?.querySelector('.popup-item');
+    first?.focus({preventScroll:true});
+    first?.scrollIntoView?.({block:'nearest'});
+  }, 0);
+}
+function closeCardPopup(restore) {
+  const st = cardPopupState;
+  cardPopupState = null;
+  const popup = $('filterPopup');
+  if(popup) {
+    popup.hidden = true;
+    popup.setAttribute('aria-hidden','true');
+    popup.inert = true;
+  }
+  if(restore && st?.card) st.card.focus({preventScroll:true});
+}
+function runCardAction(action) {
+  const st = cardPopupState;
+  if(!st) return;
+  const {card,item,mode} = st;
+  if(action === 'resume') { closeCardPopup(true); playItem(item); return; }
+  if(action === 'detail') { closeCardPopup(true); openDetail(item); return; }
+  if(action !== 'remove') { closeCardPopup(true); return; }
+
+  const row = Number(card.dataset.row || 0);
+  const indexInRow = [...document.querySelectorAll(`#shelves .card[data-row="${row}"]`)].indexOf(card);
+  const rect = card.getBoundingClientRect();
+  closeCardPopup(false);
+
+  if(mode === 'continue') {
+    if(removeContinue(item)) {
+      toast('Đã xoá khỏi Xem tiếp');
+      if(activeTab === 1) rerenderContinueRow(card, indexInRow);
+      else focusAfterRemoval(rect, row, indexInRow);
+    } else card.focus({preventScroll:true});
+    return;
+  }
+  if(saveItem(item) && !isSaved(item)) {
+    toast('Đã bỏ lưu');
+    if(activeTab === 5) {
+      renderSavedList();
+      focusAfterRemoval(rect, row, indexInRow);
+    } else focusAfterRemoval(rect, row, indexInRow);
+  } else card.focus({preventScroll:true});
+}
+
 function openFilterPopup(type, triggerBtn) {
   const tabDef = CATEGORY_DEFS[activeTab];
   if (!tabDef) return;
+  if (cardPopupState) closeCardPopup(false);
   const currentFilter = tabFilters[activeTab] || { source: 'all', genre: 'all', country: 'all', sort: 'year_desc', page: 1 };
 
   let options = [];
@@ -775,6 +928,7 @@ async function fetchCategoryPage(tab, currentFilter, version, focusAction = null
         return card(x, r, c, true, true);
       }).join('');
       lazyArt(gridEl, 0);
+      requestAnimationFrame(fitInfoColumn);
     }
 
     if (focusAction === 'nav' || document.activeElement?.closest('#nav')) {
@@ -860,6 +1014,7 @@ function selectCategoryFilter(filterType, value) {
 
 async function openTab(tab) {
   closeFilterPopup(null);
+  closeCardPopup(false);
   closeReadMore();
   activeTab = tab; const version = ++viewVersion; clearTimeout(searchTimer); renderNav(); setHero(null);
   document.body.classList?.toggle?.('search-mode', tab === 0);
@@ -869,7 +1024,7 @@ async function openTab(tab) {
   $('shelves').innerHTML = ''; window.scrollTo(0,0);
   $('nav').querySelector('[aria-current]')?.focus({preventScroll:true});
   if(tab === 0) { catState=null; search(); return; }
-  if(tab === 5) { catState=null; renderShelves([{def:{h:'Phim đã lưu',kind:'land'},list:[...savedItems].reverse()}]); if(!savedItems.length) $('shelves').innerHTML='<p class="empty">Bạn chưa lưu phim nào. Chọn “Lưu phim” để xem lại tại đây.</p>'; return; }
+  if(tab === 5) { catState=null; renderSavedList(); return; }
   if(tab >= 2 && tab <= 4) { renderCategoryTab(tab, 'nav'); return; }
   catState = null;
   const chosen = defs;
@@ -877,7 +1032,8 @@ async function openTab(tab) {
   if(version !== viewVersion) return;
   const hero=groups.flatMap(g=>g.list)[0];
   const cont=continueList();
-  viewLoading(false); setHero(hero); renderShelves(cont.length ? [{def:{h:'Xem tiếp',kind:'land',cont:true},list:cont},...groups] : groups); revealApp(hero);
+  viewLoading(false); setHero(hero);
+  renderShelves(cont.length ? [{def:{h:'Xem tiếp',kind:'land',cont:true},list:cont},...groups] : groups); revealApp(hero);
 }
 // Lift the startup splash once fonts and the hero backdrop are ready, so the first visible frame is the final layout.
 let splashTimer=setTimeout(()=>revealApp(),8000);
@@ -899,10 +1055,61 @@ const notice = document.createElement('div'); notice.className='hint'; notice.se
 function toast(message) { notice.textContent=message; notice.hidden=false; clearTimeout(noticeTimer); noticeTimer=setTimeout(()=>notice.hidden=true,2500); }
 function saveItem(x) {
   const next = isSaved(x) ? savedItems.filter(s=>key(s)!==key(x)) : [...savedItems,x];
-  try {localStorage.setItem('cinebolt.saved',JSON.stringify(next));} catch {toast('Không thể lưu phim trên thiết bị này.');return;}
+  try {localStorage.setItem('cinebolt.saved',JSON.stringify(next));} catch {toast('Không thể lưu phim trên thiết bị này.');return false;}
   savedItems=next;
   document.querySelectorAll('[data-action="save"]').forEach(b=>setSaveButton(b,isSaved(x)));
   toast(isSaved(x)?'Đã lưu phim vào mục Đã lưu.':'Đã bỏ phim khỏi mục Đã lưu.');
+  return true;
+}
+// Drop the continue-watching entry for a film and every progress/watched record tied to it.
+function removeContinue(x) {
+  if(!x) return false;
+  const k=key(x), nextHistory={...historyMap}, nextProgress={...progressMap}, nextWatched={...watchedMap};
+  delete nextHistory[k]; delete nextWatched[k];
+  Object.keys(nextProgress).forEach(id=>{ if(id===x.id || id.startsWith(`${x.id}:`)) delete nextProgress[id]; });
+  try {
+    localStorage.setItem('cinebolt.history',JSON.stringify(nextHistory));
+    localStorage.setItem('cinebolt.progress',JSON.stringify(nextProgress));
+    localStorage.setItem('cinebolt.watched',JSON.stringify(nextWatched));
+  } catch { toast('Không thể xoá phim trên thiết bị này.'); return false; }
+  historyMap=nextHistory; progressMap=nextProgress; watchedMap=nextWatched;
+  return true;
+}
+// Keep focus on a control after a row changes: the card that took its place, else the one before it,
+// else the nearest control below/above, and never <body>.
+function focusAfterRemoval(rect, row, indexInRow) {
+  const visible = el => el && el.getClientRects && el.getClientRects().length && !el.closest('[hidden],[inert]');
+  const cards = [...document.querySelectorAll('#shelves .card')].filter(visible);
+  const sameRow = cards.filter(el => Number(el.dataset.row) === row);
+  let target = sameRow[indexInRow] || sameRow[indexInRow-1] || null;
+  if(!target && rect) {
+    const cx = (rect.left + rect.right) / 2, cy = (rect.top + rect.bottom) / 2;
+    let best = Infinity;
+    for(const el of cards) {
+      const r = el.getBoundingClientRect();
+      const d = Math.abs((r.left+r.right)/2-cx) + Math.abs((r.top+r.bottom)/2-cy)*4;
+      if(d < best) { best = d; target = el; }
+    }
+  }
+  if(!target) target = [...document.querySelectorAll('#shelves button')].filter(el => !el.closest('#shelves .shelf > h2') && visible(el))[0] || null;
+  if(!target) target = $('nav')?.querySelector('[aria-current]') || null;
+  if(target) { target.focus({preventScroll:true}); target.scrollIntoView?.({block:'nearest',inline:'nearest'}); }
+}
+function rerenderContinueRow(oldCard, indexInRow) {
+  const row = Number(oldCard?.dataset?.row || 0), rect = oldCard?.getBoundingClientRect?.();
+  const section = $('shelves').querySelector('[data-cont]');
+  if(!section) return;
+  const cont = continueList();
+  if(!cont.length) {
+    section.remove();
+  } else {
+    const body = section.querySelector('.shelf-body');
+    if(!body) return;
+    const at = [...$('shelves').children].indexOf(section);
+    body.innerHTML = shelfBodyHtml({def:{cont:true},list:cont}, at < 0 ? 0 : at);
+  }
+  renumberShelfRows();
+  focusAfterRemoval(rect, row, indexInRow);
 }
 let detailItem, detailVersion=0;
 const detailCache=new Map();
@@ -1115,13 +1322,14 @@ async function search() {
 // The TV keyboard opens whenever an editable field takes focus and then swallows the D-pad, so the field stays
 // keyboard-less (inputmode=none) while the remote walks over it; OK asks for the keyboard, leaving it turns it off again.
 function editSearch(){const s=$('searchInput');s.inputMode='text';try{window.CineBolt?.showKeyboard();}catch{}}
-window.cineBoltOk=()=>{const s=$('searchInput');if(document.activeElement===s && s.inputMode==='none')editSearch();};
+window.cineBoltOk=()=>{const s=$('searchInput');if(document.activeElement===s && s.inputMode==='none')editSearch();else startCardHold(document.activeElement);};
 $('searchInput').addEventListener('blur',()=>{$('searchInput').inputMode='none';});
 document.addEventListener('scroll',()=>document.body.classList.toggle('scrolled',scrollY>24),{passive:true});
+window.addEventListener('resize',()=>requestAnimationFrame(fitInfoColumn),{passive:true});
 $('searchInput').addEventListener('input',()=>{clearTimeout(searchTimer);++viewVersion;searchTimer=setTimeout(search,350);});
 document.addEventListener('click',event=>{
   if(event.target.classList.contains('filter-popup-backdrop') || event.target.dataset.action === 'closePopup'){
-    closeFilterPopup(null);
+    if(cardPopupState) closeCardPopup(true); else closeFilterPopup(null);
     return;
   }
   if(event.target.dataset.action === 'closeReadMore'){
@@ -1130,9 +1338,11 @@ document.addEventListener('click',event=>{
   }
   const b=event.target.closest('button');if(!b)return;
   if(b.classList.contains('popup-item')){
+    if(cardPopupState){runCardAction(b.dataset.cardAction);return;}
     closeFilterPopup(b.dataset.value);
     return;
   }
+  if(b.classList.contains('card') && holdEligible(b) && Date.now() < ignoreCardClickUntil){event.preventDefault();return;}
   if(b.dataset.dropdown){
     openFilterPopup(b.dataset.dropdown, b);
     return;
@@ -1160,6 +1370,7 @@ document.addEventListener('click',event=>{
   switch(b.dataset.action){case 'play':playItem(x);break;case 'save':saveItem(x);break;case 'detail':openDetail(x);break;case 'closeDetail':closeDetail();break;case 'retryDetail':loadDetail(detailItem);break;case 'retryCategory':renderCategoryTab(activeTab);break;case 'retry':openTab(activeTab);break;}
 });
 document.addEventListener('focusin',event=>{
+  if(holdState && event.target!==holdState.card) cancelCardHold();
   document.querySelectorAll('.f').forEach(el=>el.classList.remove('f'));
   const b=event.target.closest('button'); b?.classList.add('f');
   if(b && (b.dataset.season!==undefined||b.dataset.range!==undefined))selectEpisodeTab(b);
@@ -1168,6 +1379,27 @@ document.addEventListener('focusin',event=>{
     if(item) setCategoryFocusedFilm(item);
     if (tabFilters[activeTab]) tabFilters[activeTab].lastCardId = b.dataset.item;
   }
+});
+function shortCardAction(card) {
+  const item = items.get(card?.dataset?.item);
+  if(!item) return;
+  // Continue cards keep today's split: resume only when the row offered a resume target, otherwise details.
+  if(card.dataset.hold === 'continue' && card.dataset.resume) playItem(item);
+  else openDetail(item);
+}
+document.addEventListener('keyup',event=>{
+  const k=event.key;
+  if(k!=='Enter'&&k!==' ') return;
+  if(cardPopupState) cardPopupKeyupSeen=true;
+  const st=holdState;
+  if(!st) return;
+  clearTimeout(st.timer);
+  holdState=null;
+  if(st.opened){ ignoreCardClickUntil=Date.now()+500; return; }
+  if(document.activeElement===st.card){ ignoreCardClickUntil=Date.now()+400; shortCardAction(st.card); }
+});
+document.addEventListener('focusout',event=>{
+  if(holdState && event.target===holdState.card && event.relatedTarget!==holdState.card) cancelCardHold();
 });
 /* Geometric D-pad move for the details page (buttons, chips and the episode grid). */
 function spatialTarget(controls, focus, k) {
@@ -1298,6 +1530,46 @@ document.addEventListener('keydown',event=>{
     }
     return;
   }
+
+  // Hold-OK card actions can open on Home and the saved tab too, so they are handled before the tab-specific D-pad code.
+  if(cardPopupState){
+    if(k==='Escape'||(k==='Backspace'&&focus.tagName!=='INPUT')){
+      event.preventDefault();
+      closeCardPopup(true);
+      return;
+    }
+    if(k==='Enter'||k===' '){
+      event.preventDefault();
+      // Repeats from the same hold must not fire the first item; wait for a released, fresh press.
+      if(event.repeat || !cardPopupKeyupSeen) return;
+      if(focus && focus.classList.contains('popup-item')) runCardAction(focus.dataset.cardAction);
+      return;
+    }
+    if(k==='ArrowUp'||k==='ArrowDown'){
+      event.preventDefault();
+      const list=[...$('filterPopupList').querySelectorAll('.popup-item')];
+      const idx=list.indexOf(focus);
+      const nextIdx=k==='ArrowUp'?Math.max(0,idx-1):Math.min(list.length-1,idx+1);
+      const target=list[nextIdx];
+      if(target){ target.focus({preventScroll:true}); target.scrollIntoView?.({block:'nearest'}); }
+      return;
+    }
+    if(k==='ArrowLeft'||k==='ArrowRight'||k==='Tab'){
+      event.preventDefault();
+      return;
+    }
+    return;
+  }
+
+  // Eligible cards delay their short OK action to keyup so a hold can open the popup instead.
+  if(holdEligible(focus) && (k==='Enter'||k===' ')){
+    event.preventDefault();
+    if(event.repeat) return;
+    ignoreCardClickUntil = Date.now() + 900;
+    startCardHold(focus);
+    return;
+  }
+  if(holdState && k!=='Enter' && k!==' ') cancelCardHold();
 
   // Rail navigation: when focus is inside #nav
   if(focus.closest('#nav')){
